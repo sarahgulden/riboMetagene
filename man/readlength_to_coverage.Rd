@@ -18,5 +18,7 @@ A named list: one element per readlength, each containing
 a list with $plus and $minus Rle coverage
 }
 \description{
-Convert tagged reads into per-readlength, per-strand coverage (Rle)
+Uses only the 5' end of each read (not the full footprint width),
+since P-site offset analysis is based on where reads start, not
+the entire region they cover.
 }
