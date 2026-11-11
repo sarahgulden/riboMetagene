@@ -1,63 +1,125 @@
-#' Run the full ribosome profiling metagene pipeline
+#' Run the full Ribo-seq metagene pipeline
 #'
-#' Wraps the complete workflow: for each BAM file, extracts read lengths,
-#' builds per-readlength coverage, extracts signal around start and/or
-#' stop codons, normalizes, finds P-site offsets (from start-codon signal),
-#' and applies P-site correction. Returns one long dataframe ready for
-#' plotting/comparison across samples.
+#' From 5' end tables to P-site-corrected profiles around start and stop codons:
+#' maps the 5' ends to transcripts, builds the profiles, finds the P-site offset of every read
+#' length, checks the periodicity in the CDS, selects the read lengths with consistent offsets
+#' and clear periodicity, and applies the correction.
 #'
-#' @param samples Dataframe from list_bam_samples() (needs filepath, sample_name).
-#'   Any extra columns you've added (e.g. tissue, timepoint) are kept and
-#'   merged into the final result automatically.
-#' @param readlengths Which readlengths to process, e.g. 27:35
-#' @param chrom_sizes Named vector of chromosome lengths
-#' @param start_ranges Output of get_codon_ranges(..., codon = "start_codon").
-#'   Required, since P-site offsets are always calculated from start-codon signal.
-#' @param stop_ranges Output of get_codon_ranges(..., codon = "stop_codon").
-#'   Optional - omit if you only want start-codon analysis.
-#' @param window Window size used when building start_ranges/stop_ranges
-#' @param threshold Zero-filtering threshold passed to normalize_mat()
-#' @param offset_group_cols Columns identifying a "group" for P-site offset
-#'   consistency checking, e.g. "sample_name" or c("tissue", "timepoint")
-#' @return A dataframe with sample metadata, feature, readlength, position,
-#'   signal, peak_position, and position_corrected
+#' @param counts Named list of 5' end tables (from extract_5prime() or read_5prime_tables()),
+#'   or tables that were already mapped with map_to_transcripts(). Already mapped tables skip
+#'   the slowest step, which helps when you rerun with other settings.
+#' @param annot Output of prepare_annotation() (a list with exons_tx and tx_info)
+#' @param samples Optional data frame with sample_name plus your experiment columns
+#'   (tissue, timepoint, ...). They are added to the results.
+#' @param readlengths Read lengths to consider, e.g. 26:32 (the QC step helps to choose)
+#' @param select If TRUE, keep only read lengths that pass select_readlengths(); if FALSE,
+#'   keep all of `readlengths`
+#' @param min_agree,min_frame0 Passed to select_readlengths()
+#' @param features "start", "stop" or both. "start" is always needed, because the offsets
+#'   are determined from the start codon.
+#' @param upstream,downstream Nucleotides before and after the codon in the profiles
+#' @param threshold Passed to build_signal_df_tx(): maximum share of zero positions per site
+#' @param common_set Passed to build_signal_df_tx()
+#' @param skip_codons Passed to psite_frames(): codons skipped at both ends of the CDS
+#' @param trim_edges If TRUE, keep only corrected positions that all selected read lengths cover
+#' @param keep_mapped If TRUE, the mapped tables are returned too (they are large)
+#' @return A list with
+#'   \item{corrected}{profiles of the selected read lengths with position_corrected}
+#'   \item{offsets}{P-site offset per read length (with the votes in attr "peaks")}
+#'   \item{periodicity}{periodicity score per sample and read length}
+#'   \item{frames}{P-sites per frame, sample and read length}
+#'   \item{signal}{profiles of all considered read lengths, before correction}
+#'   \item{readlengths}{the read lengths that were used}
+#'   \item{mapped}{only if keep_mapped = TRUE}
 #' @export
-metagene_pipeline <- function(samples,
-                              readlengths,
-                              chrom_sizes,
-                              start_ranges,
-                              stop_ranges = NULL,
-                              window = 25,
-                              threshold = 0.8,
-                              offset_group_cols = "sample_name") {
+metagene_pipeline <- function(counts, annot, samples = NULL,
+                              readlengths = 26:32,
+                              select = TRUE, min_agree = 0.9, min_frame0 = 0.8,
+                              features = c("start", "stop"),
+                              upstream = 25, downstream = 25,
+                              threshold = 0.95, common_set = FALSE,
+                              skip_codons = 5, trim_edges = TRUE,
+                              keep_mapped = FALSE) {
 
-  # step 1: build the raw signal dataframe (loops over all samples/readlengths/features)
-  cat("=== Step 1/3: extracting signal from all samples ===\n")
-  signal_df <- build_signal_df(
-    samples      = samples,
-    readlengths  = readlengths,
-    chrom_sizes  = chrom_sizes,
-    start_ranges = start_ranges,
-    stop_ranges  = stop_ranges,
-    window       = window,
-    threshold    = threshold
-  )
+  # 0. check the input before the slow steps start
+  if (is.data.frame(counts)) {
+    stop("'counts' has to be a named list with one table per sample", call. = FALSE)
+  }
+  if (!all(c("exons_tx", "tx_info") %in% names(annot))) {
+    stop("'annot' has to come from prepare_annotation()", call. = FALSE)
+  }
+  features <- match.arg(features, c("start", "stop"), several.ok = TRUE)
+  if (!"start" %in% features) {
+    stop("The offsets come from the start codon, so 'features' has to include \"start\"",
+         call. = FALSE)
+  }
+  if (!is.null(samples)) {
+    missing <- setdiff(names(counts), samples$sample_name)
+    if (length(missing) > 0) {
+      stop("These samples are missing in 'samples': ", paste(missing, collapse = ", "),
+           call. = FALSE)
+    }
+  }
 
-  # step 2: bring back any extra metadata columns from `samples`
-  # (e.g. tissue, timepoint) - merge on whatever columns are shared
-  extra_cols <- setdiff(colnames(samples), c("filepath", "filename"))
-  meta <- samples[, extra_cols, drop = FALSE]
-  signal_df <- merge(signal_df, meta, by = "sample_name")
+  # 1. 5' ends -> transcript coordinates (skipped if the tables are already mapped)
+  cat("##### Step 1/5: mapping 5' ends to transcripts #####\n")
+  already_mapped <- all(c("transcript_id", "tx_pos") %in% colnames(counts[[1]]))
+  if (already_mapped) {
+    cat("The tables are already mapped, skipping\n")
+    mapped <- counts
+  } else {
+    mapped <- map_to_transcripts(counts, annot$exons_tx)
+  }
 
-  # step 3: find P-site offsets from start-codon signal, then apply correction
-  cat("=== Step 2/3: finding P-site offsets ===\n")
-  offsets <- find_psite_offsets(signal_df, group_cols = offset_group_cols)
-  print(offsets)
+  # 2. profiles around the codons, for all considered read lengths
+  cat("##### Step 2/5: signal profiles #####\n")
+  signal_df <- build_signal_df_tx(mapped, annot$tx_info, readlengths = readlengths,
+                                  features = features, upstream = upstream,
+                                  downstream = downstream, threshold = threshold,
+                                  common_set = common_set, samples = samples)
 
-  cat("=== Step 3/3: applying P-site correction ===\n")
-  corrected_df <- apply_psite_correction(signal_df, offsets)
+  # 3. P-site offset per read length (the samples vote)
+  cat("##### Step 3/5: P-site offsets #####\n")
+  offsets <- find_psite_offsets(signal_df, group_cols = "sample_name")
 
-  cat("Done!", nrow(corrected_df), "rows in final dataframe\n")
+  # 4. periodicity: in which frame of the CDS do the P-sites fall?
+  cat("##### Step 4/5: periodicity in the CDS #####\n")
+  frames <- psite_frames(mapped, annot$tx_info, offsets, skip_codons = skip_codons,
+                         samples = samples)
+  score  <- periodicity_score(frames)
 
-  return(corrected_df)
+  # 5. choose the read lengths and apply the correction
+  cat("##### Step 5/5: read lengths and correction #####\n")
+  if (select) {
+    use_rl <- select_readlengths(offsets, score, min_agree = min_agree, min_frame0 = min_frame0)
+    if (length(use_rl) == 0) {
+      stop("No read length passed the checks. Try lower values for min_agree / min_frame0, ",
+           "or select = FALSE.", call. = FALSE)
+    }
+  } else {
+    use_rl <- intersect(readlengths, offsets$readlength)
+    cat("Using all requested read lengths:", paste(use_rl, collapse = ", "), "\n")
+  }
+
+  offsets_use  <- offsets[offsets$readlength %in% use_rl, ]
+  corrected_df <- apply_psite_correction(signal_df[signal_df$readlength %in% use_rl, ],
+                                         offsets_use)
+
+  # every read length is shifted by a different amount, so at the edges some read
+  # lengths have no data: keep only the positions that all selected read lengths cover
+  if (trim_edges) {
+    lo <- max(tapply(corrected_df$position_corrected, corrected_df$readlength, min))
+    hi <- min(tapply(corrected_df$position_corrected, corrected_df$readlength, max))
+    corrected_df <- corrected_df[corrected_df$position_corrected >= lo &
+                                   corrected_df$position_corrected <= hi, ]
+    cat("Kept corrected positions", lo, "to", hi, "(covered by all selected read lengths)\n")
+  }
+  rownames(corrected_df) <- NULL
+
+  result <- list(corrected = corrected_df, offsets = offsets, periodicity = score,
+                 frames = frames, signal = signal_df, readlengths = use_rl)
+  if (keep_mapped) result$mapped <- mapped
+
+  cat("Done.\n")
+  result
 }

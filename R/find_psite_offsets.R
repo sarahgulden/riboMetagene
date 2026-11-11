@@ -24,6 +24,10 @@ find_psite_offsets <- function(signal_df, group_cols = "sample_name") {
     d[which.max(d$signal), ]
   }))
 
+  # show how the groups voted: rows = read length, columns = peak position, values = number of groups
+  cat("Votes per read length (columns = peak position, values = number of samples):\n")
+  print(table(peaks$readlength, peaks$position))
+
   # count how often each position wins, per readlength
   peak_counts <- as.data.frame(table(peaks$readlength, peaks$position))
   names(peak_counts) <- c("readlength", "position", "n")
@@ -34,9 +38,14 @@ find_psite_offsets <- function(signal_df, group_cols = "sample_name") {
     d[which.max(d$n), ]
   }))
 
-  data.frame(
+  out <- data.frame(
     readlength    = as.numeric(as.character(offsets$readlength)),
     peak_position = as.numeric(as.character(offsets$position)),
     stringsAsFactors = FALSE
   )
+
+  # keep the peak of every group, so select_readlengths() can check how well the groups agree
+  attr(out, "peaks") <- peaks
+  out
+
 }

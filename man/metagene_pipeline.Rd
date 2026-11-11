@@ -2,49 +2,71 @@
 % Please edit documentation in R/metagene_pipeline.R
 \name{metagene_pipeline}
 \alias{metagene_pipeline}
-\title{Run the full ribosome profiling metagene pipeline}
+\title{Run the full Ribo-seq metagene pipeline}
 \usage{
 metagene_pipeline(
-  samples,
-  readlengths,
-  chrom_sizes,
-  start_ranges,
-  stop_ranges = NULL,
-  window = 25,
-  threshold = 0.8,
-  offset_group_cols = "sample_name"
+  counts,
+  annot,
+  samples = NULL,
+  readlengths = 26:32,
+  select = TRUE,
+  min_agree = 0.9,
+  min_frame0 = 0.8,
+  features = c("start", "stop"),
+  upstream = 25,
+  downstream = 25,
+  threshold = 0.95,
+  common_set = FALSE,
+  skip_codons = 5,
+  trim_edges = TRUE,
+  keep_mapped = FALSE
 )
 }
 \arguments{
-\item{samples}{Dataframe from list_bam_samples() (needs filepath, sample_name).
-Any extra columns you've added (e.g. tissue, timepoint) are kept and
-merged into the final result automatically.}
+\item{counts}{Named list of 5' end tables (from extract_5prime() or read_5prime_tables()),
+or tables that were already mapped with map_to_transcripts(). Already mapped tables skip
+the slowest step, which helps when you rerun with other settings.}
 
-\item{readlengths}{Which readlengths to process, e.g. 27:35}
+\item{annot}{Output of prepare_annotation() (a list with exons_tx and tx_info)}
 
-\item{chrom_sizes}{Named vector of chromosome lengths}
+\item{samples}{Optional data frame with sample_name plus your experiment columns
+(tissue, timepoint, ...). They are added to the results.}
 
-\item{start_ranges}{Output of get_codon_ranges(..., codon = "start_codon").
-Required, since P-site offsets are always calculated from start-codon signal.}
+\item{readlengths}{Read lengths to consider, e.g. 26:32 (the QC step helps to choose)}
 
-\item{stop_ranges}{Output of get_codon_ranges(..., codon = "stop_codon").
-Optional - omit if you only want start-codon analysis.}
+\item{select}{If TRUE, keep only read lengths that pass select_readlengths(); if FALSE,
+keep all of \code{readlengths}}
 
-\item{window}{Window size used when building start_ranges/stop_ranges}
+\item{min_agree, min_frame0}{Passed to select_readlengths()}
 
-\item{threshold}{Zero-filtering threshold passed to normalize_mat()}
+\item{features}{"start", "stop" or both. "start" is always needed, because the offsets
+are determined from the start codon.}
 
-\item{offset_group_cols}{Columns identifying a "group" for P-site offset
-consistency checking, e.g. "sample_name" or c("tissue", "timepoint")}
+\item{upstream, downstream}{Nucleotides before and after the codon in the profiles}
+
+\item{threshold}{Passed to build_signal_df_tx(): maximum share of zero positions per site}
+
+\item{common_set}{Passed to build_signal_df_tx()}
+
+\item{skip_codons}{Passed to psite_frames(): codons skipped at both ends of the CDS}
+
+\item{trim_edges}{If TRUE, keep only corrected positions that all selected read lengths cover}
+
+\item{keep_mapped}{If TRUE, the mapped tables are returned too (they are large)}
 }
 \value{
-A dataframe with sample metadata, feature, readlength, position,
-signal, peak_position, and position_corrected
+A list with
+\item{corrected}{profiles of the selected read lengths with position_corrected}
+\item{offsets}{P-site offset per read length (with the votes in attr "peaks")}
+\item{periodicity}{periodicity score per sample and read length}
+\item{frames}{P-sites per frame, sample and read length}
+\item{signal}{profiles of all considered read lengths, before correction}
+\item{readlengths}{the read lengths that were used}
+\item{mapped}{only if keep_mapped = TRUE}
 }
 \description{
-Wraps the complete workflow: for each BAM file, extracts read lengths,
-builds per-readlength coverage, extracts signal around start and/or
-stop codons, normalizes, finds P-site offsets (from start-codon signal),
-and applies P-site correction. Returns one long dataframe ready for
-plotting/comparison across samples.
+From 5' end tables to P-site-corrected profiles around start and stop codons:
+maps the 5' ends to transcripts, builds the profiles, finds the P-site offset of every read
+length, checks the periodicity in the CDS, selects the read lengths with consistent offsets
+and clear periodicity, and applies the correction.
 }
