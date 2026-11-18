@@ -237,11 +237,9 @@ Periodicity: the fraction of P-sites per frame. Without periodicity
 every frame has 1/3 (dashed line).
 
 ``` r
-ggplot(res$frames, aes(x = factor(readlength), y = fraction, fill = factor(frame))) +
-  geom_boxplot(outlier.size = 0.8) +
-  geom_hline(yintercept = 1/3, linetype = "dashed") +
-  labs(x = "Read length (nt)", y = "Fraction of P-sites in the CDS", fill = "Frame") +
-  theme_classic(base_size = 12)
+plot_periodicity(res$frames)                                              # per read length
+plot_periodicity(res$frames, type = "heatmap", label_by = "label")        # per sample
+plot_periodicity(res$frames, type = "bar", readlengths = res$readlengths, color_by = "timepoint")
 ```
 
 The read length QC has its own plot functions (`plot_readlength_line()`,
@@ -294,6 +292,12 @@ only part of the read lengths.
 | `periodicity_score(frames)` | Per sample and read length: number of P-sites, share in frame 0, dominant frame and a score from 0 (no periodicity) to 1 (all in one frame) |
 | `select_readlengths(offsets, score, min_agree = 0.9, min_frame0 = 0.8)` | Applies the two criteria and returns the read lengths that pass |
 | `metagene_pipeline(...)` | Runs everything above (see the settings section) |
+
+### Periodicity
+
+| Function | Purpose and arguments |
+|----|----|
+| `plot_periodicity(frames, type = "boxplot", readlengths = NULL, color_by = "sample_name", label_by = "sample_name", order_by = NULL, low_colour, high_colour)` | Plots the frame distribution of the P-sites. `type` is `"boxplot"`, `"heatmap"` or `"bar"` |
 
 ## How it works
 
